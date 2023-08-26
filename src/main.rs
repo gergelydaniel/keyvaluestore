@@ -1,12 +1,16 @@
 use std::collections::HashMap;
+use std::fmt::Debug;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
+use std::time::SystemTime;
 
 use axum::{Router, routing::{get, post}, TypedHeader};
 use axum::extract::{Path, State};
-use axum::headers::Authorization;
+use axum::headers::{Authorization, Date};
 use axum::headers::authorization::Bearer;
 use axum::http::StatusCode;
+use axum::response::Response;
+use httpdate::fmt_http_date;
 use ini::ini;
 
 struct AppConfig {
@@ -16,10 +20,16 @@ struct AppConfig {
 }
 
 #[derive(Clone)]
+struct EntryState {
+    value: String,
+    modified_date: Date,
+}
+
+#[derive(Clone)]
 struct AppState {
     read_token: String,
     write_token: String,
-    values: Arc<Mutex<HashMap<String, String>>>,
+    values: Arc<Mutex<HashMap<String, EntryState>>>,
 }
 
 fn read_app_config() -> AppConfig {
@@ -62,13 +72,22 @@ async fn read(
     Path(key): Path<String>,
     auth: TypedHeader<Authorization<Bearer>>,
     State(app_state): State<AppState>,
-) -> Result<String, StatusCode> {
+) -> Result<Response<String>, StatusCode> {
     let auth_token = auth.0.0.token();
 
     if auth_token == app_state.read_token {
         match app_state.values.lock().unwrap().get(&key) {
             None => Err(StatusCode::NO_CONTENT),
-            Some(value) => Ok(value.clone())
+            Some(value) => {
+                let cloned = value.clone();
+                let response = Response::builder()
+                    .status(StatusCode::OK)
+                    .header("Last-Modified", fmt_http_date(SystemTime::from(cloned.modified_date)))
+                    .body(cloned.value)
+                    .unwrap();
+
+                Ok(response)
+            }
         }
     } else {
         Err(StatusCode::UNAUTHORIZED)
@@ -85,7 +104,11 @@ async fn write(
 
     if auth_token == app_state.write_token {
         let mut map = app_state.values.lock().unwrap();
-        map.insert(key, body);
+        let new_entry = EntryState {
+            value: body,
+            modified_date: Date::from(SystemTime::now()),
+        };
+        map.insert(key, new_entry);
         Ok(())
     } else {
         Err(StatusCode::UNAUTHORIZED)
